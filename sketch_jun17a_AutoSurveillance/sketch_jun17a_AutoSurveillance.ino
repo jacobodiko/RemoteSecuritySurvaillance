@@ -1,7 +1,7 @@
 // Blynk template and Wi-Fi credentials
-#define BLYNK_TEMPLATE_ID "TMPL2C9_8E695"
-#define BLYNK_TEMPLATE_NAME "Home Surveillance"
-#define BLYNK_AUTH_TOKEN "9Dz_fybMUNC5VvqvPqLC0Mn7xW9MG39u"
+#define BLYNK_TEMPLATE_ID "TMPL2AYsdr9zk"
+#define BLYNK_TEMPLATE_NAME "Home Security"
+#define BLYNK_AUTH_TOKEN "u4DPdSaE7yw7ClcPGOCf5QkfozAlXoZP"
 
 // Include necessary libraries
 #include <BlynkSimpleEsp32.h>
@@ -19,10 +19,10 @@ const char *pass = "123456789";
 #define MOTOR_IN2 4
 #define ENABLE_PIN 16
 
-// Stepper Motor Configuration (L298 Driver)
+// Stepper Motor Configuration (17H4401 Stepper Motor)
 #define STEPPER_IN1 14
-#define STEPPER_IN2 12 // Modified to connect to GPIO 12
-#define STEPPER_IN3 13 // Modified to connect to GPIO 13
+#define STEPPER_IN2 12
+#define STEPPER_IN3 13
 #define STEPPER_IN4 15
 const int stepsPerRevolution = 200;
 Stepper stepper(stepsPerRevolution, STEPPER_IN1, STEPPER_IN2, STEPPER_IN3, STEPPER_IN4);
@@ -46,16 +46,22 @@ HardwareSerial ss(1); // Initialize UART1 for GPS communication
 // Blynk Virtual Pins
 #define VPIN_MOTOR V1
 #define VPIN_LOCK_UNLOCK_DOOR V2
-#define VPIN_SIREN_SPRAY V4
-#define VPIN_GPS_LAT_LONG V5
-#define VPIN_GPS_SWITCH V6 // GPS switch virtual pin
+#define VPIN_SIREN_SPRAY V3
+#define VPIN_GPS_LATITUDE V0
+#define VPIN_GPS_LONGITUDE V4
 
 BlynkTimer timer;
 
 bool isLocked = false;
 bool isMotorRunning = false;
 bool motorDirection = false;
-bool isGPSTracking = false; // Variable to track the GPS switch state
+
+void reconnectBlynk() {
+    if (!Blynk.connected()) {
+        Serial.println("Reconnecting to Blynk...");
+        Blynk.connect();
+    }
+}
 
 void setup() {
     // Start serial communication
@@ -77,33 +83,77 @@ void setup() {
     pinMode(PUMP_IN1, OUTPUT);
     pinMode(PUMP_IN2, OUTPUT);
 
-    // Timer to check force sensor
+    // Timer to check force sensor every 1 second
     timer.setInterval(1000L, checkForceSensor);
+
+    // Timer to send GPS data every 1 minute
+    timer.setInterval(60000L, sendGPS);
 
     // Set labels in Blynk for easier UI control
     Blynk.setProperty(VPIN_MOTOR, "label", "DC Motor (ON/OFF)");
     Blynk.setProperty(VPIN_LOCK_UNLOCK_DOOR, "label", "Lock/Unlock Door");
     Blynk.setProperty(VPIN_SIREN_SPRAY, "label", "Siren and Spray");
-    Blynk.setProperty(VPIN_GPS_LAT_LONG, "label", "GPS Lat/Long");
 
     Serial.println("Blynk Online");
 }
 
 void loop() {
-    Blynk.run();  // Always run Blynk
-    timer.run();  // Run Blynk timers
-    updateGPS();  // Update GPS data
+    if (Blynk.connected()) {
+        Blynk.run();  // Always run Blynk if connected
+    } else {
+        reconnectBlynk(); // Attempt to reconnect if disconnected
+    }
 
-    // Motor operation check
+    timer.run();  // Run Blynk timers
+    updateGPS();  // Update GPS data continuously
+
+    // Operate the motor only if it is running
     if (isMotorRunning) {
         operateMotor();
+    }
+}
+
+// GPS function to send location data to Blynk every 1 minute
+void sendGPS() {
+    while (ss.available() > 0) {
+        gps.encode(ss.read());
+    }
+
+    if (!gps.location.isValid()) {
+        Serial.println("Failed to read from GPS Module!");
+        return;
+    }
+
+    // Get latitude and longitude
+    float latitude = gps.location.lat();
+    float longitude = gps.location.lng();
+
+    // Send latitude and longitude to Blynk
+    Blynk.virtualWrite(VPIN_GPS_LATITUDE, String(latitude, 6));
+    Blynk.virtualWrite(VPIN_GPS_LONGITUDE, String(longitude, 6));
+
+    // Debugging in Serial Monitor
+    Serial.print("Latitude: ");
+    Serial.println(latitude, 6);
+    Serial.print("Longitude: ");
+    Serial.println(longitude, 6);
+}
+
+// Update GPS data if available
+void updateGPS() {
+    while (ss.available() > 0) {
+        gps.encode(ss.read());
+        if (gps.location.isUpdated()) {
+            String gps_data = String(gps.location.lat(), 6) + "," + String(gps.location.lng(), 6);
+            Serial.println("GPS Location Updated: " + gps_data);
+        }
     }
 }
 
 // DC Motor ON/OFF control via Blynk
 BLYNK_WRITE(VPIN_MOTOR) {
     int value = param.asInt();
-    
+
     if (value == 1) {
         Serial.println("Motor ON: Clockwise");
         motorDirection = false;
@@ -168,36 +218,39 @@ BLYNK_WRITE(VPIN_LOCK_UNLOCK_DOOR) {
 }
 
 void lockDoor() {
-    stepper.step(-stepsPerRevolution / 2);
+    stepper.step(50);  // Moves the motor 90 degrees to lock the door
     isLocked = true;
     Serial.println("Door Locked");
 }
 
 void unlockDoor() {
-    stepper.step(stepsPerRevolution / 2);
+    stepper.step(-50);  // Moves the motor 90 degrees in the reverse direction to unlock
     isLocked = false;
     Serial.println("Door Unlocked");
 }
 
+// Check force sensor and send notification if force is detected
 void checkForceSensor() {
     int forceValue = analogRead(FORCE_SENSOR_PIN);
     if (forceValue > forceSensorThreshold && !forceDetected) {
         forceDetected = true;
         Blynk.logEvent("force_detected", "Force detected on door!");
-        triggerSpray();
     } else if (forceValue <= forceSensorThreshold) {
         forceDetected = false;
     }
 }
 
-void triggerSpray() {
-    if (!sprayActive) {
-        sprayActive = true;
+// Spray and Siren control via Blynk
+BLYNK_WRITE(VPIN_SIREN_SPRAY) {
+    int value = param.asInt();
+    if (value == 1) {
         activatePumpAndSiren();
-        timer.setTimeout(30000L, deactivatePumpAndSiren);
+    } else {
+        deactivatePumpAndSiren();
     }
 }
 
+// Trigger spray and siren
 void activatePumpAndSiren() {
     digitalWrite(PUMP_IN1, HIGH);
     digitalWrite(PUMP_IN2, LOW);
@@ -209,32 +262,4 @@ void deactivatePumpAndSiren() {
     digitalWrite(PUMP_IN2, LOW);
     sprayActive = false;
     Serial.println("Spray and Siren Deactivated");
-}
-
-BLYNK_WRITE(VPIN_SIREN_SPRAY) {
-    int value = param.asInt();
-    if (value) {
-        triggerSpray();
-    }
-}
-
-// GPS Switch control via Blynk
-BLYNK_WRITE(VPIN_GPS_SWITCH) {
-    isGPSTracking = param.asInt(); // Update GPS tracking state based on Blynk switch
-    if (isGPSTracking) {
-        Serial.println("GPS Switch ON: Tracking...");
-    } else {
-        Serial.println("GPS Switch OFF: Stopped tracking.");
-    }
-}
-
-void updateGPS() {
-    while (ss.available() > 0) {
-        gps.encode(ss.read());
-        if (gps.location.isUpdated() && isGPSTracking) { // Check if GPS tracking is active
-            String gps_data = String(gps.location.lat(), 6) + "," + String(gps.location.lng(), 6);
-            Blynk.virtualWrite(VPIN_GPS_LAT_LONG, gps_data);
-            Serial.println("GPS Location Sent: " + gps_data);
-        }
-    }
 }
