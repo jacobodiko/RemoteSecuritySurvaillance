@@ -1,11 +1,10 @@
-// Blynk template and Wi-Fi credentials
+// Blynk template and Wi-Fi credentials 
 #define BLYNK_TEMPLATE_ID "TMPL2AYsdr9zk"
 #define BLYNK_TEMPLATE_NAME "Home Security"
 #define BLYNK_AUTH_TOKEN "u4DPdSaE7yw7ClcPGOCf5QkfozAlXoZP"
 
 // Include necessary libraries
 #include <BlynkSimpleEsp32.h>
-#include <Stepper.h>
 #include <TinyGPS++.h>
 #include <WiFi.h>
 
@@ -19,13 +18,10 @@ const char *pass = "123456789";
 #define MOTOR_IN2 4
 #define ENABLE_PIN 16
 
-// Stepper Motor Configuration (17H4401 Stepper Motor)
-#define STEPPER_IN1 14
-#define STEPPER_IN2 12
-#define STEPPER_IN3 13
-#define STEPPER_IN4 15
-const int stepsPerRevolution = 200;
-Stepper stepper(stepsPerRevolution, STEPPER_IN1, STEPPER_IN2, STEPPER_IN3, STEPPER_IN4);
+// Solenoid Lock Configuration (L298 Driver)
+#define SOLENOID_IN1 14
+#define SOLENOID_IN2 12
+#define SOLENOID_ENABLE 27
 
 // Limit Switches
 #define LIMIT_SWITCH_OPEN 32
@@ -57,7 +53,7 @@ bool isMotorRunning = false;
 bool motorDirection = false;
 
 void reconnectBlynk() {
-    if (!Blynk.connected()) {
+    if (WiFi.status() == WL_CONNECTED && !Blynk.connected()) {
         Serial.println("Reconnecting to Blynk...");
         Blynk.connect();
     }
@@ -70,13 +66,29 @@ void setup() {
     // Start GPS serial communication on specified pins
     ss.begin(9600, SERIAL_8N1, 3, 1); // ESP32 Rx (GPIO3) to GPS Tx, ESP32 Tx (GPIO1) to GPS Rx
 
-    // Initialize Blynk
-    Blynk.begin(BLYNK_AUTH_TOKEN, ssid, pass);
+    // Connect to Wi-Fi
+    WiFi.begin(ssid, pass);
+    while (WiFi.status() != WL_CONNECTED) {
+        delay(1000);
+        Serial.println("Connecting to Wi-Fi...");
+    }
+    Serial.println("Wi-Fi connected.");
 
-    // Initialize GPIOs
+    // Initialize Blynk
+    Blynk.config(BLYNK_AUTH_TOKEN);
+
+    // Initialize GPIOs for L298N control of DC motor
     pinMode(MOTOR_IN1, OUTPUT);
     pinMode(MOTOR_IN2, OUTPUT);
     pinMode(ENABLE_PIN, OUTPUT);
+
+    // Initialize GPIOs for L298N control of solenoid lock
+    pinMode(SOLENOID_IN1, OUTPUT);
+    pinMode(SOLENOID_IN2, OUTPUT);
+    pinMode(SOLENOID_ENABLE, OUTPUT);
+    digitalWrite(SOLENOID_ENABLE, HIGH); // Enable solenoid driver
+
+    // Initialize other GPIOs
     pinMode(LIMIT_SWITCH_OPEN, INPUT_PULLUP);
     pinMode(LIMIT_SWITCH_CLOSE, INPUT_PULLUP);
     pinMode(FORCE_SENSOR_PIN, INPUT);
@@ -98,7 +110,7 @@ void setup() {
 }
 
 void loop() {
-    if (Blynk.connected()) {
+    if (WiFi.status() == WL_CONNECTED && Blynk.connected()) {
         Blynk.run();  // Always run Blynk if connected
     } else {
         reconnectBlynk(); // Attempt to reconnect if disconnected
@@ -205,28 +217,36 @@ void stopMotor() {
     isMotorRunning = false;
 }
 
-// Combined Lock/Unlock Door using a single Blynk button
+// Lock/Unlock Door using Solenoid Lock with a Blynk switch
 BLYNK_WRITE(VPIN_LOCK_UNLOCK_DOOR) {
     int value = param.asInt();
-    if (value) {
-        if (isLocked) {
-            unlockDoor();
-        } else {
-            lockDoor();
-        }
+    if (value == 1) {
+        lockDoor();
+    } else if (value == 0) {
+        unlockDoor();
     }
 }
 
 void lockDoor() {
-    stepper.step(50);  // Moves the motor 90 degrees to lock the door
+    digitalWrite(SOLENOID_IN1, HIGH);
+    digitalWrite(SOLENOID_IN2, LOW);
     isLocked = true;
     Serial.println("Door Locked");
 }
 
 void unlockDoor() {
-    stepper.step(-50);  // Moves the motor 90 degrees in the reverse direction to unlock
+    digitalWrite(SOLENOID_IN1, LOW);
+    digitalWrite(SOLENOID_IN2, LOW);  // Deactivate solenoid (unlock the door)
     isLocked = false;
     Serial.println("Door Unlocked");
+}
+
+// Ensure solenoid remains in its current state unless controlled by Blynk
+void maintainSolenoidState() {
+    if (!isLocked) {
+        digitalWrite(SOLENOID_IN1, LOW);
+        digitalWrite(SOLENOID_IN2, LOW);  // Maintain unlocked state
+    }
 }
 
 // Check force sensor and send notification if force is detected
